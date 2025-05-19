@@ -178,12 +178,13 @@ class HandModelTrainer:
         
         return history
     
-    def save_model(self, model_name=None):
+    def save_model(self, model_name=None, export_path=None):
         """
-        Save the trained model
+        Save the trained model in Keras format
         
         Args:
             model_name: Name for the saved model
+            export_path: Path to export the model files
         """
         if self.model is None:
             print("No model to save. Train a model first.")
@@ -193,16 +194,28 @@ class HandModelTrainer:
         if model_name is None:
             model_name = f"hand_gesture_model_{len(np.unique(self.y))}_classes"
         
-        # Save model in TensorFlow SavedModel format
-        model_path = os.path.join(self.model_dir, model_name)
-        self.model.save(model_path)
+        # Create export path if not provided
+        if export_path is None:
+            export_path = os.path.join(self.model_dir, "export")
+            os.makedirs(export_path, exist_ok=True)
+        
+        # Save model in Keras .h5 format
+        model_h5_path = os.path.join(export_path, f"{model_name}.h5")
+        self.model.save(model_h5_path)
         
         # Save label encoder classes
-        classes_path = os.path.join(self.model_dir, f"{model_name}_classes.npy")
+        classes_path = os.path.join(export_path, f"{model_name}_classes.npy")
         np.save(classes_path, self.label_encoder.classes_)
         
-        print(f"Model saved to {model_path}")
+        # Save model architecture as JSON
+        model_json_path = os.path.join(export_path, f"{model_name}_architecture.json")
+        with open(model_json_path, "w") as json_file:
+            json_file.write(self.model.to_json())
+        
+        print(f"Model saved to {model_h5_path}")
+        print(f"Model architecture saved to {model_json_path}")
         print(f"Classes saved to {classes_path}")
+        print(f"Export path: {export_path}")
     
     def plot_training_history(self, history):
         """
