@@ -39,23 +39,28 @@ class HandGesturePredictor:
         """
         # Find the latest model if model_name is not provided
         if model_name is None:
-            model_dirs = [d for d in os.listdir(self.model_dir) 
-                         if os.path.isdir(os.path.join(self.model_dir, d)) and 
-                         d.startswith("hand_gesture_model")]
+            # Look for .h5 files in the export directory
+            export_dir = os.path.join(self.model_dir, "export")
+            if not os.path.exists(export_dir):
+                raise FileNotFoundError(f"No export directory found in {self.model_dir}")
             
-            if not model_dirs:
-                raise FileNotFoundError(f"No models found in {self.model_dir}")
+            model_files = [f for f in os.listdir(export_dir) 
+                         if f.endswith(".h5") and 
+                         f.startswith("hand_gesture_model")]
+            
+            if not model_files:
+                raise FileNotFoundError(f"No model files found in {export_dir}")
             
             # Sort by modification time (newest first)
-            model_dirs.sort(key=lambda d: os.path.getmtime(os.path.join(self.model_dir, d)), reverse=True)
-            model_name = model_dirs[0]
+            model_files.sort(key=lambda f: os.path.getmtime(os.path.join(export_dir, f)), reverse=True)
+            model_name = model_files[0].replace(".h5", "")
         
         # Load model
-        model_path = os.path.join(self.model_dir, model_name)
+        model_path = os.path.join(self.model_dir, "export", f"{model_name}.h5")
         model = tf.keras.models.load_model(model_path)
         
         # Load class labels
-        classes_path = os.path.join(self.model_dir, f"{model_name}_classes.npy")
+        classes_path = os.path.join(self.model_dir, "export", f"{model_name}_classes.npy")
         classes = np.load(classes_path, allow_pickle=True)
         
         print(f"Loaded model from {model_path}")
