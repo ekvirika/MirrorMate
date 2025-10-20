@@ -36,7 +36,7 @@ public class HandTrackingReceiver : MonoBehaviour
     // Hand data
     private MultiHandData currentMultiHandData;
     private Dictionary<string, Dictionary<int, GameObject>> handJointObjects = new Dictionary<string, Dictionary<int, GameObject>>();
-    private Dictionary<string, List<GameObject>> handBoneObjects = new Dictionary<string, List<GameObject>>();
+    private Dictionary<string, Dictionary<string, GameObject>> handBoneObjects = new Dictionary<string, Dictionary<string, GameObject>>();
     private Dictionary<string, List<int[]>> connections = new Dictionary<string, List<int[]>>();
     
     // For backward compatibility
@@ -311,19 +311,36 @@ public class HandTrackingReceiver : MonoBehaviour
         // Process each hand
         HashSet<string> activeHandIds = new HashSet<string>();
         
+        if (multiHandData == null || multiHandData.hands == null)
+        {
+            Debug.LogWarning("[HandTrackingReceiver] Received null hand data");
+            return;
+        }
+        
+        Debug.Log($"[HandTrackingReceiver] Processing {multiHandData.hands.Count} hands");
+        
         foreach (var hand in multiHandData.hands)
         {
-            string handId = hand.hand_type + System.Guid.NewGuid().ToString().Substring(0, 8);
+            if (hand == null || hand.landmarks == null)
+            {
+                Debug.LogWarning("[HandTrackingReceiver] Hand or landmarks is null");
+                continue;
+            }
+            
+            Debug.Log($"[HandTrackingReceiver] Hand: {hand.hand_type}, Landmarks: {hand.landmarks.Count}");
+            
+            // Use consistent hand ID (just the hand type, not a new GUID each frame)
+            string handId = hand.hand_type;
             activeHandIds.Add(handId);
             
-            // Choose material based on hand type
+            // Choose material based on hand type (with null checks)
             Material handMaterial = hand.hand_type == "Left" ? leftHandMaterial : rightHandMaterial;
             
             // Make sure we have a dictionary for this hand
             if (!handJointObjects.ContainsKey(handId))
             {
                 handJointObjects[handId] = new Dictionary<int, GameObject>();
-                handBoneObjects[handId] = new List<GameObject>();
+                handBoneObjects[handId] = new Dictionary<string, GameObject>();
             }
             
             // Create or update joint objects
@@ -346,6 +363,12 @@ public class HandTrackingReceiver : MonoBehaviour
                 // Create or update joint object
                 if (!handJointObjects[handId].ContainsKey(id))
                 {
+                    if (jointPrefab == null)
+                    {
+                        Debug.LogError("[HandTrackingReceiver] Joint Prefab is not assigned!");
+                        return;
+                    }
+                    
                     GameObject jointObj = Instantiate(jointPrefab, position, Quaternion.identity, transform);
                     jointObj.name = $"{hand.hand_type}_Joint_{landmark.name}";
                     
@@ -360,9 +383,9 @@ public class HandTrackingReceiver : MonoBehaviour
                     
                     jointObj.transform.localScale = Vector3.one * scale;
                     
-                    // Set material
+                    // Set material (only if available)
                     Renderer renderer = jointObj.GetComponent<Renderer>();
-                    if (renderer != null)
+                    if (renderer != null && landmarkMaterial != null)
                     {
                         renderer.material = landmarkMaterial;
                     }
@@ -375,17 +398,10 @@ public class HandTrackingReceiver : MonoBehaviour
                 }
             }
             
-            // Create bone connections if enhanced visualization is enabled
+            // Create or update bone connections if enhanced visualization is enabled
             if (enhancedVisualization)
             {
-                // Clear previous bones
-                foreach (var bone in handBoneObjects[handId])
-                {
-                    Destroy(bone);
-                }
-                handBoneObjects[handId].Clear();
-                
-                // Create new bones
+                // Create or update bones
                 foreach (var connectionGroup in connections)
                 {
                     // Skip forearm connections if not showing forearm
@@ -399,9 +415,20 @@ public class HandTrackingReceiver : MonoBehaviour
                             Vector3 startPos = handJointObjects[handId][connection[0]].transform.position;
                             Vector3 endPos = handJointObjects[handId][connection[1]].transform.position;
                             
-                            // Create bone object
-                            GameObject bone = CreateBone(startPos, endPos, hand.hand_type, connectionGroup.Key == "forearm");
-                            handBoneObjects[handId].Add(bone);
+                            // Create unique bone ID
+                            string boneId = $"{connectionGroup.Key}_{connection[0]}_{connection[1]}";
+                            
+                            // Create or update bone object
+                            if (!handBoneObjects[handId].ContainsKey(boneId))
+                            {
+                                GameObject bone = CreateBone(startPos, endPos, hand.hand_type, connectionGroup.Key == "forearm");
+                                bone.name = $"{hand.hand_type}_Bone_{boneId}";
+                                handBoneObjects[handId][boneId] = bone;
+                            }
+                            else
+                            {
+                                UpdateBone(handBoneObjects[handId][boneId], startPos, endPos);
+                            }
                         }
                     }
                 }
@@ -450,7 +477,7 @@ public class HandTrackingReceiver : MonoBehaviour
             }
             
             // Destroy all bone objects
-            foreach (var bone in handBoneObjects[handId])
+            foreach (var bone in handBoneObjects[handId].Values)
             {
                 Destroy(bone);
             }
@@ -458,6 +485,30 @@ public class HandTrackingReceiver : MonoBehaviour
             // Remove from dictionaries
             handJointObjects.Remove(handId);
             handBoneObjects.Remove(handId);
+        }
+    }
+    
+    private void UpdateBone(GameObject bone, Vector3 startPos, Vector3 endPos)
+    {
+        // Calculate bone position and rotation
+        Vector3 direction = endPos - startPos;
+        Vector3 midpoint = (startPos + endPos) / 2;
+        float length = direction.magnitude;
+        
+        // Update position
+        bone.transform.position = midpoint;
+        
+        // Update rotation
+        bone.transform.up = direction.normalized;
+        
+        // Update scale (length)
+        if (bonePrefab != null)
+        {
+            bone.transform.localScale = new Vector3(boneWidth, length / 2, boneWidth);
+        }
+        else
+        {
+            bone.transform.localScale = new Vector3(boneWidth, length, boneWidth);
         }
     }
     
@@ -485,17 +536,24 @@ public class HandTrackingReceiver : MonoBehaviour
             bone.transform.localScale = new Vector3(boneWidth, length, boneWidth);
         }
         
-        // Set material
+        // Set material (only if available)
         Renderer renderer = bone.GetComponent<Renderer>();
         if (renderer != null)
         {
+            Material materialToUse = null;
+            
             if (isForearm && forearmMaterial != null)
             {
-                renderer.material = forearmMaterial;
+                materialToUse = forearmMaterial;
             }
             else
             {
-                renderer.material = handType == "Left" ? leftHandMaterial : rightHandMaterial;
+                materialToUse = handType == "Left" ? leftHandMaterial : rightHandMaterial;
+            }
+            
+            if (materialToUse != null)
+            {
+                renderer.material = materialToUse;
             }
         }
         
@@ -574,19 +632,19 @@ public class HandTrackingReceiver : MonoBehaviour
     {
         public double timestamp;
         public List<HandData> hands;
-        
+
         // Not serialized, used internally for timing
         [JsonIgnore]
         public long receivedTimeMs;
     }
-    
+
     [Serializable]
     public class HandData
     {
         public double timestamp;
         public string hand_type;
         public List<LandmarkData> landmarks;
-        
+
         // Not serialized, used internally for timing
         [JsonIgnore]
         public long receivedTimeMs;
@@ -598,5 +656,10 @@ public class HandTrackingReceiver : MonoBehaviour
         public int id;
         public string name;
         public float[] position;
+    }
+
+    public MultiHandData GetCurrentMultiHandData()
+    {
+        return currentMultiHandData;
     }
 }
