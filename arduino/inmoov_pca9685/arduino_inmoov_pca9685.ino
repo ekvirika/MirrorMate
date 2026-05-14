@@ -21,7 +21,7 @@ int thumbAngle = 0;
 int indexAngle = 0;
 int middleAngle = 0;
 int ringAngle = 0;
-int pinkyAngle = 0;
+int pinkyAngle = 0; 
 int handAngle = 90;
 
 // Serial communication

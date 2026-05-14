@@ -5,7 +5,7 @@ import time
 import random
 
 # Arduino Configuration
-ARDUINO_PORT = "/dev/cu.usbserial-1140"  # Arduino port for macOS
+ARDUINO_PORT = "/dev/cu.usbserial-1110"  # Arduino port for macOS
 BAUD_RATE = 9600
 CAMERA_INDEX = 0  # Default webcam
 
@@ -30,6 +30,14 @@ countdown_active = False
 countdown_start_time = 0
 COUNTDOWN_DURATION = 3  # seconds
 
+# Servo animation state (non-blocking)
+servo_state = "idle"  # idle, sending, displaying, resetting
+gesture_display_start = 0
+servo_queue = []
+servo_queue_idx = 0
+last_servo_time = 0
+SERVO_DELAY = 0.01
+
 # Arduino serial connection (optional for now)
 arduino = None
 arduino_connected = False
@@ -41,7 +49,7 @@ def connect_to_arduino():
     try:
         print(f"Connecting to Arduino on {ARDUINO_PORT}...")
         arduino = serial.Serial(ARDUINO_PORT, BAUD_RATE, timeout=1)
-        time.sleep(2)  # Wait for Arduino to initialize
+        time.sleep(0.5)  # Wait for Arduino to initialize
         arduino_connected = True
         print(f"✅ Connected to Arduino on {ARDUINO_PORT}")
         return True
@@ -113,55 +121,72 @@ def determine_winner(player, robot):
     else:
         return 'robot'
 
-def send_robot_gesture(gesture):
-    """
-    Send servo commands to make the robot hand show the gesture
-    This is a placeholder - will be implemented later
-    """
-    if not arduino_connected:
-        print(f"[SIMULATION] Robot would show: {gesture.upper()}")
+FINGER_NAMES = {3: "Thumb", 1: "Index", 2: "Middle", 4: "Ring", 5: "Pinky"}
+
+GESTURE_SERVOS = {
+    'rock':     {3: 180, 1: 180, 2: 180, 4: 180, 5: 180},
+    'paper':    {3: 0,   1: 0,   2: 0,   4: 0,   5: 0  },
+    'scissors': {3: 180, 1: 0,   2: 0,   4: 180, 5: 180},
+}
+
+def queue_gesture(gesture):
+    """Queue servo commands for a gesture without blocking."""
+    global servo_queue, servo_queue_idx, servo_state
+
+    if gesture not in GESTURE_SERVOS:
+        print(f"⚠️ Unknown gesture: {gesture}")
         return
-    
-    # TODO: Implement actual servo commands based on camera_to_arduino_pca9685.py
-    # For now, just print what would be sent
-    print(f"Sending {gesture} gesture to robot...")
-    
-    if gesture == 'rock':
-        # All fingers closed
-        commands = [
-            "0:0",  # Thumb closed
-            "1:0",  # Index closed
-            "2:0",  # Middle closed
-            "3:0",  # Ring closed
-            "4:0",  # Pinky closed
-        ]
-    elif gesture == 'paper':
-        # All fingers open
-        commands = [
-            "0:180",  # Thumb open
-            "1:180",  # Index open
-            "2:180",  # Middle open
-            "3:180",  # Ring open
-            "4:180",  # Pinky open
-        ]
-    elif gesture == 'scissors':
-        # Index and middle open, others closed
-        commands = [
-            "0:0",    # Thumb closed
-            "1:180",  # Index open
-            "2:180",  # Middle open
-            "3:0",    # Ring closed
-            "4:0",    # Pinky closed
-        ]
-    
-    # Send commands (when Arduino is connected)
-    for cmd in commands:
-        data = f"{cmd}!\n"
-        print(f"  -> {data.strip()}")
+
+    servo_queue = list(GESTURE_SERVOS[gesture].items())
+    servo_queue_idx = 0
+    servo_state = "sending"
+    print(f"\n🤖 Robot showing: {gesture.upper()}")
+
+def process_servo_queue():
+    """Send one queued servo command per frame. Called every frame."""
+    global servo_queue_idx, servo_state, last_servo_time, gesture_display_start
+
+    if servo_state not in ("sending", "resetting"):
+        return
+
+    now = time.time()
+    if now - last_servo_time < SERVO_DELAY:
+        return
+
+    if servo_queue_idx < len(servo_queue):
+        servo_id, angle = servo_queue[servo_queue_idx]
         if arduino_connected:
-            arduino.write(data.encode())
-            arduino.flush()
-            time.sleep(0.02)
+            try:
+                arduino.write(f"{servo_id}:{angle}!\n".encode())
+                arduino.flush()
+                print(f"  ✓ {FINGER_NAMES[servo_id]} (S{servo_id}): {angle}°")
+            except Exception as e:
+                print(f"❌ Error sending to Arduino: {e}")
+        else:
+            print(f"  → {FINGER_NAMES[servo_id]} (S{servo_id}): {angle}°")
+
+        servo_queue_idx += 1
+        last_servo_time = now
+    else:
+        # All commands sent
+        if servo_state == "sending":
+            print("✅ Gesture sent to robot")
+            servo_state = "displaying"
+            gesture_display_start = now
+        elif servo_state == "resetting":
+            print("✅ Hand reset complete")
+            servo_state = "idle"
+
+def tick_servo_animation():
+    """Check display timer and trigger reset when 3 seconds have passed."""
+    global servo_state, servo_queue_idx
+
+    if servo_state == "displaying":
+        if time.time() - gesture_display_start >= COUNTDOWN_DURATION:
+            print("🔄 Resetting to open hand...")
+            servo_queue[:] = list(GESTURE_SERVOS['paper'].items())
+            servo_queue_idx = 0
+            servo_state = "resetting"
 
 def draw_game_ui(frame, player_gesture, robot_gesture, result):
     """Draw game UI on the frame"""
@@ -228,6 +253,12 @@ def draw_game_ui(frame, player_gesture, robot_gesture, result):
             cv2.putText(frame, countdown_text, (text_x, text_y),
                        cv2.FONT_HERSHEY_DUPLEX, 4, (255, 255, 0), 8)
     
+    # Draw Arduino connection status
+    status_text = "Arduino: CONNECTED" if arduino_connected else "Arduino: SIMULATION MODE"
+    status_color = (0, 255, 0) if arduino_connected else (255, 165, 0)
+    cv2.putText(frame, status_text, (width - 300, height - 50),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, status_color, 2)
+    
     # Draw instructions
     cv2.putText(frame, "Press SPACE to play | Q to quit | R to reset scores",
                 (20, height - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
@@ -235,7 +266,7 @@ def draw_game_ui(frame, player_gesture, robot_gesture, result):
 def main():
     global player_score, robot_score, ties
     global current_player_gesture, current_robot_gesture, game_result
-    global countdown_active, countdown_start_time
+    global countdown_active, countdown_start_time, servo_state
     
     # Try to connect to Arduino (optional)
     connect_to_arduino()
@@ -278,12 +309,16 @@ def main():
                     mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=2),
                     mp_drawing.DrawingSpec(color=(255, 255, 255), thickness=2)
                 )
-                
+
                 # Detect gesture
                 current_player_gesture = detect_gesture(hand_landmarks)
         else:
             current_player_gesture = None
-        
+
+        # Tick servo animation (non-blocking)
+        process_servo_queue()
+        tick_servo_animation()
+
         # Handle countdown
         if countdown_active:
             elapsed = time.time() - countdown_start_time
@@ -294,9 +329,11 @@ def main():
                 if current_player_gesture:
                     # Generate robot gesture
                     current_robot_gesture = randomize_robot_gesture()
-                    
-                    # Send gesture to robot (simulation for now)
-                    send_robot_gesture(current_robot_gesture)
+
+                    # Queue gesture commands (non-blocking)
+                    print(f"\n🎮 Playing Round:")
+                    print(f"   Your gesture: {current_player_gesture.upper()}")
+                    queue_gesture(current_robot_gesture)
                     
                     # Determine winner
                     result = determine_winner(current_player_gesture, current_robot_gesture)
@@ -333,7 +370,7 @@ def main():
         if key == ord('q'):
             print("\n👋 Quitting game...")
             break
-        elif key == ord(' ') and not countdown_active:
+        elif key == ord(' ') and not countdown_active and servo_state == "idle":
             # Start countdown
             print("\n⏱️ Starting countdown...")
             countdown_active = True
@@ -347,6 +384,7 @@ def main():
             ties = 0
             game_result = None
             current_robot_gesture = None
+            servo_state = "idle"
             print("\n🔄 Scores reset!")
     
     # Cleanup

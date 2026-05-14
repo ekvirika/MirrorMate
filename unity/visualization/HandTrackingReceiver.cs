@@ -7,6 +7,7 @@ using System.Text;
 using System.Threading;
 using UnityEngine;
 using Newtonsoft.Json;
+using System.Runtime.Serialization;
 
 public class HandTrackingReceiver : MonoBehaviour
 {
@@ -121,18 +122,11 @@ public class HandTrackingReceiver : MonoBehaviour
             
             // Try to get the local IP address to help with configuration
             try {
-                string hostName = Dns.GetHostName();
-                IPAddress[] addresses = Dns.GetHostAddresses(hostName);
-                Debug.Log("[HandTrackingReceiver] Available IP addresses on this machine:");
-                foreach (IPAddress address in addresses)
-                {
-                    if (address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork) // IPv4 only
-                    {
-                        Debug.Log($"- {address}");
-                    }
-                }
+                // Use hardcoded IP address
+                Debug.Log("[HandTrackingReceiver] Using IP address: 192.168.72.94");
+                Debug.Log("[HandTrackingReceiver] Local loopback: 127.0.0.1");
             } catch (Exception ipEx) {
-                Debug.LogWarning($"[HandTrackingReceiver] Could not determine local IP: {ipEx.Message}");
+                Debug.LogWarning($"[HandTrackingReceiver] Network error: {ipEx.Message}");
             }
         }
         catch (Exception e)
@@ -635,6 +629,7 @@ public class HandTrackingReceiver : MonoBehaviour
 
         // Not serialized, used internally for timing
         [JsonIgnore]
+        [IgnoreDataMember]
         public long receivedTimeMs;
     }
 
@@ -647,6 +642,7 @@ public class HandTrackingReceiver : MonoBehaviour
 
         // Not serialized, used internally for timing
         [JsonIgnore]
+        [IgnoreDataMember]
         public long receivedTimeMs;
     }
 

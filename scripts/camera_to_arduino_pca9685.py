@@ -6,7 +6,7 @@ import time
 import math
 
 # Arduino Configuration
-ARDUINO_PORT = "/dev/cu.usbserial-1140"  # Arduino port for macOS
+ARDUINO_PORT = "/dev/cu.usbserial-1110"  # Arduino port for macOS
 BAUD_RATE = 9600
 CAMERA_INDEX = 0  # Default webcam
 

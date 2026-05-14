@@ -136,20 +136,107 @@ class HandTracker:
             return self.landmark_names[landmark_id]
         return "Unknown"
 
+    def process_frame(self, img):
+        """
+        Process a frame and return hand tracking data in a format suitable for Unity
+        
+        Args:
+            img: Input image (BGR format)
+            
+        Returns:
+            List of dictionaries containing hand tracking data
+        """
+        img, _ = self.find_hands(img, draw=False)
+        hands_data = []
+        
+        if self.results.multi_hand_landmarks:
+            for hand_no in range(len(self.results.multi_hand_landmarks)):
+                landmarks = self.find_positions(img, hand_no)
+                hand_type = self.get_hand_type(hand_no)
+                
+                landmarks_data = []
+                for lm in landmarks:
+                    landmark_id = lm[0]
+                    landmarks_data.append({
+                        "id": landmark_id,
+                        "name": self.get_landmark_name(landmark_id),
+                        "position": [lm[1], lm[2], lm[3]]  # x, y, z coordinates
+                    })
+                
+                hand_data = {
+                    "hand_type": hand_type,
+                    "landmarks": landmarks_data
+                }
+                hands_data.append(hand_data)
+        
+        return hands_data
+
+
+def calculate_finger_angles(landmarks):
+    """
+    Calculate angles between finger segments
+    """
+    angles = {}
+    
+    # Define finger bases (MCP joints)
+    finger_bases = {
+        'thumb': 1,    # THUMB_CMC
+        'index': 5,    # INDEX_FINGER_MCP
+        'middle': 9,   # MIDDLE_FINGER_MCP
+        'ring': 13,    # RING_FINGER_MCP
+        'pinky': 17    # PINKY_MCP
+    }
+    
+    for finger, base_id in finger_bases.items():
+        if len(landmarks) >= base_id + 3:  # Ensure we have all points for the finger
+            # Get points for angle calculation
+            p1 = np.array([landmarks[base_id][1], landmarks[base_id][2]])      # MCP
+            p2 = np.array([landmarks[base_id + 1][1], landmarks[base_id + 1][2]])  # PIP
+            p3 = np.array([landmarks[base_id + 2][1], landmarks[base_id + 2][2]])  # DIP
+            
+            # Calculate vectors
+            v1 = p2 - p1
+            v2 = p3 - p2
+            
+            # Calculate angle
+            angle = np.degrees(np.arctan2(np.cross(v1, v2), np.dot(v1, v2)))
+            angles[finger] = abs(angle)
+    
+    return angles
+
+def detect_gesture(angles):
+    """
+    Detect hand gesture based on finger angles
+    """
+    if not angles:
+        return "Unknown"
+    
+    # Example gesture detection rules (can be refined)
+    if all(angle < 30 for angle in angles.values()):
+        return "Open Hand"
+    elif all(angle > 60 for angle in angles.values()):
+        return "Fist"
+    elif angles.get('index', 90) < 30 and all(angles.get(f, 90) > 60 for f in ['middle', 'ring', 'pinky']):
+        return "Pointing"
+    return "Other"
 
 def main():
     """
-    Demo function to test the hand tracker
+    Enhanced demo function to test the hand tracker with gesture recognition
     """
     # Initialize webcam
     cap = cv2.VideoCapture(0)
     
-    # Initialize hand tracker
-    tracker = HandTracker()
+    # Initialize hand tracker with higher confidence thresholds for stability
+    tracker = HandTracker(detection_confidence=0.7, tracking_confidence=0.7)
     
     # FPS calculation variables
     prev_time = 0
     curr_time = 0
+    
+    # Create named window and set it to a reasonable size
+    cv2.namedWindow("Hand Tracking", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("Hand Tracking", 1280, 720)
     
     while True:
         # Read frame from webcam
@@ -167,20 +254,46 @@ def main():
         fps = 1 / (curr_time - prev_time) if (curr_time - prev_time) > 0 else 0
         prev_time = curr_time
         
-        # Display FPS
-        cv2.putText(img, f"FPS: {int(fps)}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 
-                    1, (0, 255, 0), 2)
+        # Create a semi-transparent overlay for text
+        overlay = img.copy()
         
-        # Display hand type if detected
+        # Display information if hands are detected
         if landmarks:
+            # Get hand information
             hand_type = tracker.get_hand_type()
-            cv2.putText(img, f"Hand: {hand_type}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 
-                        1, (0, 255, 0), 2)
-            
-            # Display the z-coordinate (depth) of the wrist
             wrist_z = landmarks[0][3]
-            cv2.putText(img, f"Depth: {wrist_z:.3f}", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 
-                        1, (0, 255, 0), 2)
+            
+            # Calculate finger angles and detect gesture
+            angles = calculate_finger_angles(landmarks)
+            gesture = detect_gesture(angles)
+            
+            # Draw finger angles
+            y_pos = 70
+            cv2.putText(overlay, f"Hand: {hand_type}", (10, y_pos), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            y_pos += 40
+            
+            cv2.putText(overlay, f"Gesture: {gesture}", (10, y_pos),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            y_pos += 40
+            
+            cv2.putText(overlay, f"Depth: {wrist_z:.3f}", (10, y_pos),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            y_pos += 40
+            
+            # Display finger angles
+            for finger, angle in angles.items():
+                cv2.putText(overlay, f"{finger}: {angle:.1f}°", (10, y_pos),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                y_pos += 30
+        
+        # Always display FPS
+        cv2.putText(overlay, f"FPS: {int(fps)}", (10, 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        
+        # Blend the overlay with the original image
+        alpha = 0.7
+        img = cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0)
         
         # Show the image
         cv2.imshow("Hand Tracking", img)
