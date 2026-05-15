@@ -1,20 +1,21 @@
 import cv2
 import mediapipe as mp
 import serial
+import subprocess
 import time
 import random
 
 # Arduino Configuration
-ARDUINO_PORT = "/dev/cu.usbserial-1110"  # Arduino port for macOS
+ARDUINO_PORT = "/dev/cu.usbserial-1110"
 BAUD_RATE = 9600
-CAMERA_INDEX = 0  # Default webcam
+CAMERA_INDEX = 0
 
 # Initialize MediaPipe Hand Tracking
 mp_hands = mp.solutions.hands
 mp_drawing = mp.solutions.drawing_utils
 hands = mp_hands.Hands(
     static_image_mode=False,
-    max_num_hands=1,  # Only track one hand for the game
+    max_num_hands=1,
     min_detection_confidence=0.7,
     min_tracking_confidence=0.7
 )
@@ -23,103 +24,30 @@ hands = mp_hands.Hands(
 player_score = 0
 robot_score = 0
 ties = 0
-current_player_gesture = None
+current_player_gesture = None   # live reading every frame
+locked_player_gesture = None    # locked at the SHOOT moment
 current_robot_gesture = None
 game_result = None
 countdown_active = False
 countdown_start_time = 0
-COUNTDOWN_DURATION = 3  # seconds
+last_beat = -1
+COUNTDOWN_DURATION = 3
 
-# Servo animation state (non-blocking)
-servo_state = "idle"  # idle, sending, displaying, resetting
+# SHOOT flash
+shoot_flash_time = 0
+SHOOT_FLASH_DURATION = 0.6
+
+# Servo animation state
+# States: idle → sending_fist → holding → (pumping → holding) → sending → displaying → resetting → idle
+servo_state = "idle"
 gesture_display_start = 0
 servo_queue = []
 servo_queue_idx = 0
 last_servo_time = 0
 SERVO_DELAY = 0.01
 
-# Arduino serial connection (optional for now)
 arduino = None
 arduino_connected = False
-
-def connect_to_arduino():
-    """Try to connect to Arduino"""
-    global arduino, arduino_connected
-    
-    try:
-        print(f"Connecting to Arduino on {ARDUINO_PORT}...")
-        arduino = serial.Serial(ARDUINO_PORT, BAUD_RATE, timeout=1)
-        time.sleep(0.5)  # Wait for Arduino to initialize
-        arduino_connected = True
-        print(f"✅ Connected to Arduino on {ARDUINO_PORT}")
-        return True
-    except Exception as e:
-        print(f"❌ Failed to connect to Arduino: {e}")
-        print("Continuing without Arduino connection...")
-        return False
-
-def detect_gesture(hand_landmarks):
-    """
-    Detect rock, paper, or scissors gesture based on finger positions
-    Returns: 'rock', 'paper', 'scissors', or None
-    """
-    if not hand_landmarks:
-        return None
-    
-    # Get landmark positions
-    landmarks = hand_landmarks.landmark
-    
-    # Check if fingers are extended
-    # Thumb: compare tip (4) with IP joint (3) x-coordinate
-    thumb_extended = abs(landmarks[4].x - landmarks[3].x) > 0.05
-    
-    # Index finger: compare tip (8) with PIP joint (6) y-coordinate
-    index_extended = landmarks[8].y < landmarks[6].y
-    
-    # Middle finger: compare tip (12) with PIP joint (10) y-coordinate
-    middle_extended = landmarks[12].y < landmarks[10].y
-    
-    # Ring finger: compare tip (16) with PIP joint (14) y-coordinate
-    ring_extended = landmarks[16].y < landmarks[14].y
-    
-    # Pinky: compare tip (20) with PIP joint (18) y-coordinate
-    pinky_extended = landmarks[20].y < landmarks[18].y
-    
-    # Count extended fingers (excluding thumb for simplicity)
-    extended_fingers = sum([index_extended, middle_extended, ring_extended, pinky_extended])
-    
-    # Gesture detection logic
-    if extended_fingers == 0:
-        return 'rock'
-    elif extended_fingers >= 4:
-        return 'paper'
-    elif extended_fingers == 2 and index_extended and middle_extended:
-        return 'scissors'
-    
-    return None
-
-def randomize_robot_gesture():
-    """Generate a random gesture for the robot"""
-    return random.choice(['rock', 'paper', 'scissors'])
-
-def determine_winner(player, robot):
-    """
-    Determine the winner of the round
-    Returns: 'player', 'robot', or 'tie'
-    """
-    if player == robot:
-        return 'tie'
-    
-    winning_combinations = {
-        'rock': 'scissors',
-        'scissors': 'paper',
-        'paper': 'rock'
-    }
-    
-    if winning_combinations[player] == robot:
-        return 'player'
-    else:
-        return 'robot'
 
 FINGER_NAMES = {3: "Thumb", 1: "Index", 2: "Middle", 4: "Ring", 5: "Pinky"}
 
@@ -129,24 +57,97 @@ GESTURE_SERVOS = {
     'scissors': {3: 180, 1: 0,   2: 0,   4: 180, 5: 180},
 }
 
-def queue_gesture(gesture):
-    """Queue servo commands for a gesture without blocking."""
-    global servo_queue, servo_queue_idx, servo_state
+BEAT_WORDS  = {3: "Rock...", 2: "Paper...", 1: "Scissors..."}
+BEAT_SPEECH = {3: "Rock",   2: "Paper",   1: "Scissors"}  # spoken aloud
 
-    if gesture not in GESTURE_SERVOS:
-        print(f"⚠️ Unknown gesture: {gesture}")
-        return
 
-    servo_queue = list(GESTURE_SERVOS[gesture].items())
+def speak(text):
+    """Non-blocking text-to-speech via macOS say command."""
+    subprocess.Popen(
+        ["say", "-r", "160", text],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def connect_to_arduino():
+    global arduino, arduino_connected
+    try:
+        print(f"Connecting to Arduino on {ARDUINO_PORT}...")
+        arduino = serial.Serial(ARDUINO_PORT, BAUD_RATE, timeout=1)
+        time.sleep(0.5)
+        arduino_connected = True
+        print(f"✅ Connected to Arduino on {ARDUINO_PORT}")
+        return True
+    except Exception as e:
+        print(f"❌ Failed to connect to Arduino: {e}")
+        print("Continuing without Arduino connection...")
+        return False
+
+
+def detect_gesture(hand_landmarks):
+    if not hand_landmarks:
+        return None
+    landmarks = hand_landmarks.landmark
+    index_extended  = landmarks[8].y  < landmarks[6].y
+    middle_extended = landmarks[12].y < landmarks[10].y
+    ring_extended   = landmarks[16].y < landmarks[14].y
+    pinky_extended  = landmarks[20].y < landmarks[18].y
+    extended = sum([index_extended, middle_extended, ring_extended, pinky_extended])
+    if extended == 0:
+        return 'rock'
+    elif extended >= 4:
+        return 'paper'
+    elif extended == 2 and index_extended and middle_extended:
+        return 'scissors'
+    return None
+
+
+def determine_winner(player, robot):
+    if player == robot:
+        return 'tie'
+    beats = {'rock': 'scissors', 'scissors': 'paper', 'paper': 'rock'}
+    return 'player' if beats[player] == robot else 'robot'
+
+
+# --- Servo helpers ---
+
+def _load_queue(commands):
+    global servo_queue, servo_queue_idx
+    servo_queue = commands
     servo_queue_idx = 0
+
+
+def queue_fist():
+    """Robot makes a fist at round start — same as a human player."""
+    global servo_state
+    _load_queue(list(GESTURE_SERVOS['rock'].items()))
+    servo_state = "sending_fist"
+
+
+def queue_pump():
+    """Half-open then re-close — one pump on each beat."""
+    global servo_state
+    open_cmds  = [(s, 90)  for s in [3, 1, 2, 4, 5]]
+    close_cmds = [(s, 180) for s in [3, 1, 2, 4, 5]]
+    _load_queue(open_cmds + close_cmds)
+    servo_state = "pumping"
+
+
+def queue_gesture(gesture):
+    """Reveal the robot's chosen gesture at SHOOT."""
+    global servo_state
+    if gesture not in GESTURE_SERVOS:
+        return
+    _load_queue(list(GESTURE_SERVOS[gesture].items()))
     servo_state = "sending"
-    print(f"\n🤖 Robot showing: {gesture.upper()}")
+    print(f"🤖 Robot reveals: {gesture.upper()}")
+
 
 def process_servo_queue():
-    """Send one queued servo command per frame. Called every frame."""
     global servo_queue_idx, servo_state, last_servo_time, gesture_display_start
 
-    if servo_state not in ("sending", "resetting"):
+    if servo_state not in ("sending_fist", "sending", "resetting", "pumping"):
         return
 
     now = time.time()
@@ -159,245 +160,219 @@ def process_servo_queue():
             try:
                 arduino.write(f"{servo_id}:{angle}!\n".encode())
                 arduino.flush()
-                print(f"  ✓ {FINGER_NAMES[servo_id]} (S{servo_id}): {angle}°")
             except Exception as e:
-                print(f"❌ Error sending to Arduino: {e}")
-        else:
-            print(f"  → {FINGER_NAMES[servo_id]} (S{servo_id}): {angle}°")
-
+                print(f"❌ Arduino error: {e}")
         servo_queue_idx += 1
         last_servo_time = now
     else:
-        # All commands sent
-        if servo_state == "sending":
-            print("✅ Gesture sent to robot")
+        if servo_state == "sending_fist":
+            servo_state = "holding"           # hold fist, no auto-reset
+        elif servo_state == "pumping":
+            servo_state = "holding"           # return to holding after pump
+        elif servo_state == "sending":
             servo_state = "displaying"
             gesture_display_start = now
         elif servo_state == "resetting":
-            print("✅ Hand reset complete")
             servo_state = "idle"
+            print("✅ Hand reset")
+
 
 def tick_servo_animation():
-    """Check display timer and trigger reset when 3 seconds have passed."""
-    global servo_state, servo_queue_idx
-
+    """Auto-reset hand 3 seconds after SHOOT reveal."""
+    global servo_state
     if servo_state == "displaying":
         if time.time() - gesture_display_start >= COUNTDOWN_DURATION:
-            print("🔄 Resetting to open hand...")
-            servo_queue[:] = list(GESTURE_SERVOS['paper'].items())
-            servo_queue_idx = 0
+            _load_queue(list(GESTURE_SERVOS['paper'].items()))
             servo_state = "resetting"
+            print("🔄 Resetting hand...")
 
-def draw_game_ui(frame, player_gesture, robot_gesture, result):
-    """Draw game UI on the frame"""
+
+# --- UI ---
+
+def draw_game_ui(frame):
     height, width = frame.shape[:2]
-    
-    # Draw semi-transparent overlay for score area
+    now = time.time()
+
+    # Score bar overlay
     overlay = frame.copy()
     cv2.rectangle(overlay, (0, 0), (width, 120), (0, 0, 0), -1)
     cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
-    
-    # Draw scores
+
     cv2.putText(frame, f"Player: {player_score}", (20, 40),
                 cv2.FONT_HERSHEY_DUPLEX, 1.2, (0, 255, 0), 3)
-    cv2.putText(frame, f"Robot: {robot_score}", (width - 250, 40),
-                cv2.FONT_HERSHEY_DUPLEX, 1.2, (0, 100, 255), 3)
     cv2.putText(frame, f"Ties: {ties}", (width // 2 - 80, 40),
                 cv2.FONT_HERSHEY_DUPLEX, 1.2, (255, 255, 255), 3)
-    
-    # Draw current gestures
-    if player_gesture:
-        cv2.putText(frame, f"You: {player_gesture.upper()}", (20, 90),
+    cv2.putText(frame, f"Robot: {robot_score}", (width - 250, 40),
+                cv2.FONT_HERSHEY_DUPLEX, 1.2, (0, 100, 255), 3)
+
+    # Locked gestures (shown after SHOOT)
+    if locked_player_gesture:
+        cv2.putText(frame, f"You: {locked_player_gesture.upper()}", (20, 90),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-    
-    if robot_gesture:
-        cv2.putText(frame, f"Robot: {robot_gesture.upper()}", (width - 250, 90),
+    if current_robot_gesture:
+        cv2.putText(frame, f"Robot: {current_robot_gesture.upper()}", (width - 250, 90),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-    
-    # Draw result
-    if result:
-        result_text = ""
-        result_color = (255, 255, 255)
-        
-        if result == 'player':
-            result_text = "YOU WIN!"
-            result_color = (0, 255, 0)
-        elif result == 'robot':
-            result_text = "ROBOT WINS!"
-            result_color = (0, 100, 255)
-        elif result == 'tie':
-            result_text = "TIE!"
-            result_color = (255, 255, 0)
-        
-        # Draw result with background
-        text_size = cv2.getTextSize(result_text, cv2.FONT_HERSHEY_DUPLEX, 2, 4)[0]
-        text_x = (width - text_size[0]) // 2
-        text_y = height // 2
-        
-        cv2.rectangle(frame, 
-                     (text_x - 20, text_y - text_size[1] - 20),
-                     (text_x + text_size[0] + 20, text_y + 20),
-                     (0, 0, 0), -1)
-        cv2.putText(frame, result_text, (text_x, text_y),
-                    cv2.FONT_HERSHEY_DUPLEX, 2, result_color, 4)
-    
-    # Draw countdown if active
+
+    # Countdown beat words (Rock... Paper... Scissors...)
     if countdown_active:
-        elapsed = time.time() - countdown_start_time
+        elapsed = now - countdown_start_time
         remaining = COUNTDOWN_DURATION - int(elapsed)
-        if remaining > 0:
-            countdown_text = str(remaining)
-            text_size = cv2.getTextSize(countdown_text, cv2.FONT_HERSHEY_DUPLEX, 4, 8)[0]
-            text_x = (width - text_size[0]) // 2
-            text_y = height // 2 + 100
-            cv2.putText(frame, countdown_text, (text_x, text_y),
-                       cv2.FONT_HERSHEY_DUPLEX, 4, (255, 255, 0), 8)
-    
-    # Draw Arduino connection status
-    status_text = "Arduino: CONNECTED" if arduino_connected else "Arduino: SIMULATION MODE"
+        beat_word = BEAT_WORDS.get(remaining, "")
+        if beat_word:
+            ts = cv2.getTextSize(beat_word, cv2.FONT_HERSHEY_DUPLEX, 2, 4)[0]
+            tx = (width - ts[0]) // 2
+            cv2.putText(frame, beat_word, (tx, height // 2 + 60),
+                        cv2.FONT_HERSHEY_DUPLEX, 2, (255, 255, 0), 4)
+
+    # SHOOT flash
+    shoot_elapsed = now - shoot_flash_time if shoot_flash_time > 0 else 999
+    if shoot_elapsed < SHOOT_FLASH_DURATION:
+        ts = cv2.getTextSize("SHOOT!", cv2.FONT_HERSHEY_DUPLEX, 3, 6)[0]
+        tx = (width - ts[0]) // 2
+        cv2.putText(frame, "SHOOT!", (tx, height // 2 + 60),
+                    cv2.FONT_HERSHEY_DUPLEX, 3, (0, 80, 255), 6)
+
+    # Result (shown after SHOOT flash fades)
+    if game_result and shoot_elapsed >= SHOOT_FLASH_DURATION:
+        labels = {
+            'player': ("YOU WIN!",    (0, 255, 0)),
+            'robot':  ("ROBOT WINS!", (0, 100, 255)),
+            'tie':    ("TIE!",        (255, 255, 0)),
+        }
+        result_text, result_color = labels[game_result]
+        ts = cv2.getTextSize(result_text, cv2.FONT_HERSHEY_DUPLEX, 2, 4)[0]
+        tx = (width - ts[0]) // 2
+        ty = height // 2
+        cv2.rectangle(frame, (tx - 20, ty - ts[1] - 20), (tx + ts[0] + 20, ty + 20), (0, 0, 0), -1)
+        cv2.putText(frame, result_text, (tx, ty), cv2.FONT_HERSHEY_DUPLEX, 2, result_color, 4)
+
+    # Status / instructions
+    status = "Arduino: CONNECTED" if arduino_connected else "Arduino: SIMULATION MODE"
     status_color = (0, 255, 0) if arduino_connected else (255, 165, 0)
-    cv2.putText(frame, status_text, (width - 300, height - 50),
+    cv2.putText(frame, status, (width - 300, height - 50),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, status_color, 2)
-    
-    # Draw instructions
-    cv2.putText(frame, "Press SPACE to play | Q to quit | R to reset scores",
+    cv2.putText(frame, "SPACE to play  |  R reset  |  Q quit",
                 (20, height - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+
+# --- Main ---
 
 def main():
     global player_score, robot_score, ties
-    global current_player_gesture, current_robot_gesture, game_result
-    global countdown_active, countdown_start_time, servo_state
-    
-    # Try to connect to Arduino (optional)
+    global current_player_gesture, locked_player_gesture, current_robot_gesture, game_result
+    global countdown_active, countdown_start_time, last_beat
+    global servo_state, shoot_flash_time
+
     connect_to_arduino()
-    
-    # Open webcam
+
     cap = cv2.VideoCapture(CAMERA_INDEX)
-    
     if not cap.isOpened():
-        print("❌ Error: Could not open webcam")
+        print("❌ Could not open webcam")
         return
-    
-    print("\n🎮 Rock Paper Scissors Game Started!")
-    print("Instructions:")
-    print("  - Show your hand gesture (rock/paper/scissors)")
-    print("  - Press SPACE to start a round")
-    print("  - Press R to reset scores")
-    print("  - Press Q to quit")
-    
+
+    print("\n🎮 Rock Paper Scissors — Ready!")
+    print("  Form your gesture during countdown, reveal on SHOOT!")
+
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
-            print("❌ Error: Failed to read from webcam")
             break
-        
-        # Flip frame horizontally for mirror effect
+
         frame = cv2.flip(frame, 1)
-        
-        # Convert to RGB for MediaPipe
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        
-        # Process hand detection
         results = hands.process(rgb_frame)
-        
-        # Detect player gesture
+
+        # Live hand detection (shown during countdown, not locked yet)
         if results.multi_hand_landmarks:
             for hand_landmarks in results.multi_hand_landmarks:
-                # Draw hand landmarks
                 mp_drawing.draw_landmarks(
                     frame, hand_landmarks, mp_hands.HAND_CONNECTIONS,
                     mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=2),
                     mp_drawing.DrawingSpec(color=(255, 255, 255), thickness=2)
                 )
-
-                # Detect gesture
                 current_player_gesture = detect_gesture(hand_landmarks)
         else:
             current_player_gesture = None
 
-        # Tick servo animation (non-blocking)
+        # Servo animation tick
         process_servo_queue()
         tick_servo_animation()
 
-        # Handle countdown
+        # Countdown logic
         if countdown_active:
             elapsed = time.time() - countdown_start_time
-            if elapsed >= COUNTDOWN_DURATION:
-                # Countdown finished - play the round
-                countdown_active = False
-                
-                if current_player_gesture:
-                    # Generate robot gesture
-                    current_robot_gesture = randomize_robot_gesture()
+            remaining = COUNTDOWN_DURATION - int(elapsed)
 
-                    # Queue gesture commands (non-blocking)
-                    print(f"\n🎮 Playing Round:")
-                    print(f"   Your gesture: {current_player_gesture.upper()}")
+            # Pump fist and speak on each beat change
+            if remaining != last_beat and remaining > 0:
+                last_beat = remaining
+                speak(BEAT_SPEECH[remaining])
+                if servo_state == "holding":
+                    queue_pump()
+
+            # SHOOT moment
+            if elapsed >= COUNTDOWN_DURATION:
+                countdown_active = False
+                locked_player_gesture = current_player_gesture  # lock whatever they're showing
+                shoot_flash_time = time.time()
+                speak("Shoot!")
+
+                if locked_player_gesture:
+                    current_robot_gesture = random.choice(['rock', 'paper', 'scissors'])
                     queue_gesture(current_robot_gesture)
-                    
-                    # Determine winner
-                    result = determine_winner(current_player_gesture, current_robot_gesture)
-                    
+
+                    result = determine_winner(locked_player_gesture, current_robot_gesture)
                     if result == 'player':
                         player_score += 1
-                        game_result = 'player'
+                        speak("You win!")
                     elif result == 'robot':
                         robot_score += 1
-                        game_result = 'robot'
+                        speak("Robot wins!")
                     else:
                         ties += 1
-                        game_result = 'tie'
-                    
-                    print(f"\n🎮 Round Result:")
-                    print(f"   Player: {current_player_gesture.upper()}")
-                    print(f"   Robot: {current_robot_gesture.upper()}")
-                    print(f"   Winner: {game_result.upper()}")
-                    print(f"   Score - Player: {player_score} | Robot: {robot_score} | Ties: {ties}")
+                        speak("Tie!")
+                    game_result = result
+
+                    print(f"   You: {locked_player_gesture.upper()} | "
+                          f"Robot: {current_robot_gesture.upper()} → {result.upper()}")
+                    print(f"   Score → Player {player_score} | Robot {robot_score} | Ties {ties}")
                 else:
-                    print("⚠️ No gesture detected! Try again.")
+                    print("⚠️ No gesture detected at SHOOT — try again")
                     game_result = None
-                    current_robot_gesture = None
-        
-        # Draw UI
-        draw_game_ui(frame, current_player_gesture, current_robot_gesture, game_result)
-        
-        # Display frame
-        cv2.imshow('Rock Paper Scissors Game', frame)
-        
-        # Handle keyboard input
+                    servo_state = "idle"
+
+        draw_game_ui(frame)
+        cv2.imshow('Rock Paper Scissors', frame)
         key = cv2.waitKey(1) & 0xFF
-        
+
         if key == ord('q'):
-            print("\n👋 Quitting game...")
             break
         elif key == ord(' ') and not countdown_active and servo_state == "idle":
-            # Start countdown
-            print("\n⏱️ Starting countdown...")
+            print("\n🥊 Round starting...")
             countdown_active = True
             countdown_start_time = time.time()
-            game_result = None
+            last_beat = -1
+            locked_player_gesture = None
             current_robot_gesture = None
-        elif key == ord('r'):
-            # Reset scores
-            player_score = 0
-            robot_score = 0
-            ties = 0
             game_result = None
+            shoot_flash_time = 0
+            queue_fist()    # robot goes to fist — same starting position as player
+        elif key == ord('r'):
+            player_score = robot_score = ties = 0
+            game_result = None
+            locked_player_gesture = None
             current_robot_gesture = None
             servo_state = "idle"
-            print("\n🔄 Scores reset!")
-    
-    # Cleanup
+            print("🔄 Scores reset")
+
     cap.release()
     cv2.destroyAllWindows()
     hands.close()
     if arduino_connected:
         arduino.close()
-    
-    print("\n📊 Final Score:")
-    print(f"   Player: {player_score}")
-    print(f"   Robot: {robot_score}")
-    print(f"   Ties: {ties}")
+
+    print(f"\n📊 Final: Player {player_score} | Robot {robot_score} | Ties {ties}")
+
 
 if __name__ == "__main__":
     main()
