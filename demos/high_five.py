@@ -6,7 +6,7 @@ import random
 import math
 import numpy as np
 
-ARDUINO_PORT = "/dev/cu.usbserial-1110"
+ARDUINO_PORT = "/dev/cu.usbserial-1140"
 BAUD_RATE = 9600
 CAMERA_INDEX = 0
 

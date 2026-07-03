@@ -11,7 +11,7 @@ from typing import Dict, Any
 from hand_to_servo_mapper import HandToServoMapper
 
 class InMoovHandController:
-    def __init__(self, servo_port="/dev/ttyUSB0", unity_port=5065):
+    def __init__(self, servo_port="/dev/cu.usbserial-140", unity_port=5065):
         """
         Initialize the InMoov hand controller
         
