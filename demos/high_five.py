@@ -5,8 +5,11 @@ import time
 import random
 import math
 import numpy as np
+import sys
+sys.path.insert(0, '..')
 
-ARDUINO_PORT = "/dev/cu.usbserial-1140"
+from arduino_utils import find_arduino_port, connect_arduino
+
 BAUD_RATE = 9600
 CAMERA_INDEX = 0
 
@@ -56,13 +59,18 @@ TIRED_THRESHOLD = 10
 
 def connect_to_arduino():
     global arduino, arduino_connected
-    try:
-        arduino = serial.Serial(ARDUINO_PORT, BAUD_RATE, timeout=1)
+    port = find_arduino_port(verbose=True)
+    if not port:
+        print("⚠️  No Arduino found — running in simulation mode")
+        return
+
+    arduino = connect_arduino(port, BAUD_RATE)
+    if arduino:
         time.sleep(0.5)
         arduino_connected = True
-        print(f"✅ Arduino connected on {ARDUINO_PORT}")
-    except Exception as e:
-        print(f"⚠️  No Arduino: {e}")
+        print(f"✅ Arduino connected")
+    else:
+        print("⚠️  No Arduino found — running in simulation mode")
 
 
 def _send(servo_id, angle):

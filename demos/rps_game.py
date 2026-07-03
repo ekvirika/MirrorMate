@@ -4,9 +4,13 @@ import serial
 import subprocess
 import time
 import random
+import sys
+import platform
+sys.path.insert(0, '..')
 
-# Arduino Configuration
-ARDUINO_PORT = "/dev/cu.usbserial-1140"
+from arduino_utils import find_arduino_port, connect_arduino
+
+# Configuration
 BAUD_RATE = 9600
 CAMERA_INDEX = 0
 
@@ -72,15 +76,18 @@ def speak(text):
 
 def connect_to_arduino():
     global arduino, arduino_connected
-    try:
-        print(f"Connecting to Arduino on {ARDUINO_PORT}...")
-        arduino = serial.Serial(ARDUINO_PORT, BAUD_RATE, timeout=1)
+    port = find_arduino_port(verbose=True)
+    if not port:
+        print("Continuing without Arduino connection...")
+        return False
+
+    arduino = connect_arduino(port, BAUD_RATE)
+    if arduino:
         time.sleep(0.5)
         arduino_connected = True
-        print(f"✅ Connected to Arduino on {ARDUINO_PORT}")
+        print(f"✅ Connected!")
         return True
-    except Exception as e:
-        print(f"❌ Failed to connect to Arduino: {e}")
+    else:
         print("Continuing without Arduino connection...")
         return False
 

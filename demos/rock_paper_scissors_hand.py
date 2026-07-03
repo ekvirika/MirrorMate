@@ -1,12 +1,12 @@
 import serial
 import time
 import random
+import sys
+sys.path.insert(0, '..')
 
-# Arduino Configuration
-ARDUINO_PORT = "/dev/cu.usbserial-1140"  # Arduino port for macOS (change if needed)
+from arduino_utils import find_arduino_port, connect_arduino
+
 BAUD_RATE = 9600
-
-# Arduino serial connection
 arduino = None
 arduino_connected = False
 
@@ -14,21 +14,24 @@ def connect_to_arduino():
     """Try to connect to Arduino"""
     global arduino, arduino_connected
 
-    try:
-        print(f"Connecting to Arduino on {ARDUINO_PORT}...")
-        arduino = serial.Serial(ARDUINO_PORT, BAUD_RATE, timeout=1)
-        time.sleep(2)  # Wait for Arduino to initialize
-        arduino_connected = True
-        print(f"✅ Connected to Arduino on {ARDUINO_PORT}")
-        return True
-    except Exception as e:
-        print(f"❌ Failed to connect to Arduino: {e}")
+    port = find_arduino_port(verbose=True)
+    if not port:
+        print("\n❌ No Arduino port found!")
         print("\nTroubleshooting tips:")
         print("1. Check if the Arduino is properly plugged in")
-        print("2. Verify the port name using 'ls /dev/cu.*' in Terminal")
-        print("3. Make sure you have permission to access the port")
-        print("4. Close any other programs that might be using the port")
-        print("5. Try unplugging and plugging the Arduino back in")
+        print("2. On macOS, use 'ls /dev/cu.*' to list ports")
+        print("3. On Windows, check Device Manager for COM ports")
+        print("4. Make sure you have permission to access the port")
+        print("5. Close any other programs that might be using the port")
+        return False
+
+    arduino = connect_arduino(port, BAUD_RATE)
+    if arduino:
+        time.sleep(2)  # Wait for Arduino to initialize
+        arduino_connected = True
+        print(f"✅ Connected!")
+        return True
+    else:
         return False
 
 def send_servo_command(servo_id, angle):
